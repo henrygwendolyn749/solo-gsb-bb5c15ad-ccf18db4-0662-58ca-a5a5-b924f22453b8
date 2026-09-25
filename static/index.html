@@ -290,6 +290,32 @@
           <div id="inviteStatus" class="invite-status"></div>
           <div id="inviteCodes" class="invite-codes"></div>
         </div>
+
+        <div class="invite-box">
+          <h4>⏰ 作答开放规则</h4>
+          <p style="margin:0 0 10px;font-size:13px;color:var(--muted);line-height:1.7">
+          为<b>当前这个分享快照</b>设置新作答的开放时间与名额：未设置的项目<b>不限制</b>，时间一律按 <b>UTC</b> 填写——
+          到达<b>开始时间（含）</b>才开放，到达<b>截止时间（不含）</b>即截止；新建会话达到上限后不再接受新的作答。
+          规则随快照保存，仅拦截<b>新建会话</b>：已开始的会话仍可继续作答、撤回与续答，编辑器预览不受限制。</p>
+          <div class="open-rule-grid">
+            <label>UTC 开始时间（含）
+              <input id="openStart" type="datetime-local" step="60">
+            </label>
+            <label>UTC 截止时间（不含）
+              <input id="openEnd" type="datetime-local" step="60">
+            </label>
+            <label>新建会话上限（正整数，留空不限）
+              <input id="openMax" type="number" min="1" step="1" placeholder="不限">
+            </label>
+          </div>
+          <div class="invite-gen-row" style="margin-top:8px">
+            <button class="primary" id="openRulesSave">保存开放规则</button>
+            <button id="openRulesClear">清除全部限制</button>
+            <span id="openRulesUtcHint" class="open-rule-hint"></span>
+          </div>
+          <div id="openRulesStatus" class="invite-status"></div>
+          <div id="openRulesError" class="resume-error" style="display:none"></div>
+        </div>
       </div>
     </div>
     <footer><button data-close="shareModal">关闭</button></footer>

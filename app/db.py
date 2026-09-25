@@ -33,6 +33,14 @@ def init_db() -> None:
                 script_name TEXT NOT NULL,
                 content    TEXT NOT NULL,
                 invite_only INTEGER NOT NULL DEFAULT 0,   -- 1 = new answers need an invite code
+                -- Answer open rules for NEW sessions (NULL = unrestricted):
+                -- open_start/open_end are UTC ISO timestamps; the window is
+                -- [open_start, open_end) — start inclusive, end exclusive.
+                -- max_sessions caps the number of answer sessions created
+                -- under this snapshot. Already-started sessions are unaffected.
+                open_start  TEXT,
+                open_end    TEXT,
+                max_sessions INTEGER,
                 created_at TEXT NOT NULL
             );
 
@@ -117,6 +125,10 @@ def init_db() -> None:
             ("shares", "lang_label", "ALTER TABLE shares ADD COLUMN lang_label TEXT"),
             ("shares", "translations",
              "ALTER TABLE shares ADD COLUMN translations TEXT NOT NULL DEFAULT '{}'"),
+            ("shares", "open_start", "ALTER TABLE shares ADD COLUMN open_start TEXT"),
+            ("shares", "open_end", "ALTER TABLE shares ADD COLUMN open_end TEXT"),
+            ("shares", "max_sessions",
+             "ALTER TABLE shares ADD COLUMN max_sessions INTEGER"),
         ]
         for table, column, ddl in backfills:
             cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}

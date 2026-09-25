@@ -482,6 +482,38 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .invite-state { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .invite-code:not(.used) .invite-state { color: #15803d; }
 
+/* ---------- share answer open rules ---------- */
+.open-rule-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+}
+.open-rule-grid label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--muted);
+}
+.open-rule-grid input {
+  font: inherit; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: #f9fafb;
+}
+.open-rule-hint { font-size: 12px; color: var(--muted); }
+.open-state {
+  display: inline-block; margin-right: 8px; padding: 2px 10px;
+  border-radius: 999px; font-weight: 700; white-space: nowrap;
+}
+.open-now    { color: #166534; background: #dcfce7; border: 1px solid #86efac; }
+.open-wait   { color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; }
+.open-closed { color: #991b1b; background: #fee2e2; border: 1px solid #fca5a5; }
+.open-full   { color: #6b21a8; background: #f3e8ff; border: 1px solid #d8b4fe; }
+
+.gate-notice {
+  margin: 10px 0 12px; font-size: 14px; line-height: 1.8;
+  background: #fffbeb; border: 1px solid #fcd34d; color: #78350f;
+  border-radius: 8px; padding: 10px 14px;
+}
+.gate-schedule {
+  margin: 0 0 12px; font-size: 12px; line-height: 1.8; color: var(--muted);
+}
+.gate-notice-chip { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+
 /* ---------- multilingual translations ---------- */
 .i18n-badge {
   display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 600;

@@ -1060,6 +1060,14 @@ function bindToolbar() {
   $("#shareCreate").onclick = createShareSnapshot;
   $("#inviteGen").onclick = generateInvites;
   $("#inviteRefresh").onclick = loadInvites;
+  $("#openRulesSave").onclick = saveOpenRules;
+  $("#openRulesClear").onclick = clearOpenRules;
+  const updateUtcHint = () => {
+    const el = $("#openRulesUtcHint");
+    if (el) el.textContent = `当前 UTC 时间：${currentUtcInputValue()}（填写时以此为准）`;
+  };
+  updateUtcHint();
+  setInterval(updateUtcHint, 15000);
   $("#btnExport").onclick = exportJson;
   $("#btnImport").onclick = () => $("#importFile").click();
   $("#importFile").onchange = importJson;
@@ -1886,6 +1894,7 @@ async function createShareSnapshot() {
       copyText(shareState.url).then((ok) => toast(ok ? "链接已复制" : "复制失败，请手动选择复制"));
     };
     loadInvites();
+    loadOpenRules();
   } catch (err) {
     toast("创建分享失败：" + err.message, 3500);
   }
@@ -1942,6 +1951,125 @@ async function generateInvites() {
     toast(`已生成 ${r.created.length} 个邀请码（未用 ${r.unused_count} / 共 ${r.total}）`);
   } catch (err) {
     toast("生成失败：" + err.message, 3500);
+  }
+  btn.disabled = false;
+}
+
+// ---- answer open rules (UTC start / end / session cap) --------------------
+
+// Stored values are UTC ISO strings; the editor inputs are filled with the
+// UTC value verbatim (to the minute) because the labels explicitly say UTC.
+function utcToInput(iso) { return iso ? iso.slice(0, 16) : ""; }
+function fmtUtcEditor(iso) {
+  return iso ? iso.replace("T", " ").replace("+00:00", "").slice(0, 19) + " UTC" : "";
+}
+
+function currentUtcInputValue() {
+  // "YYYY-MM-DDTHH:mm" in UTC for the hint line.
+  const d = new Date();
+  return new Date(d.getTime() + d.getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16).replace("T", " ");
+}
+
+function showOpenRulesError(msg) {
+  const el = $("#openRulesError");
+  el.textContent = msg || "";
+  el.style.display = msg ? "" : "none";
+}
+
+async function loadOpenRules() {
+  if (!shareState.token) return;
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}`);
+    $("#openStart").value = utcToInput(r.open_start);
+    $("#openEnd").value = utcToInput(r.open_end);
+    $("#openMax").value = r.max_sessions ?? "";
+    renderOpenRulesStatus(r.open_state);
+    showOpenRulesError("");
+  } catch (err) {
+    showOpenRulesError("开放规则加载失败：" + err.message);
+  }
+}
+
+function renderOpenRulesStatus(s) {
+  const el = $("#openRulesStatus");
+  const capTxt = s.max_sessions != null
+    ? ` · 上限 <b>${s.max_sessions}</b> 份（已创建 <b>${s.run_count}</b>）`
+    : ` · 已创建会话 <b>${s.run_count}</b> 份`;
+  const rangeTxt =
+    (s.open_start ? `开始（含）：<b>${fmtUtcEditor(s.open_start)}</b>` : "") +
+    (s.open_start && s.open_end ? " ～ " : "") +
+    (s.open_end ? `截止（不含）：<b>${fmtUtcEditor(s.open_end)}</b>` : "");
+  const rangeLine = rangeTxt ? `<div style="color:var(--muted)">⏰ ${rangeTxt}</div>` : "";
+  const chips = {
+    open: `<span class="open-state open-now">🟢 当前开放中</span>`,
+    not_started: `<span class="open-state open-wait">🕒 未开放</span>`,
+    closed: `<span class="open-state open-closed">⛔ 已截止</span>`,
+    full: `<span class="open-state open-full">🈵 已满</span>`,
+  };
+  el.innerHTML = `${chips[s.state] || ""}<span>${capTxt}</span>${rangeLine}`;
+}
+
+function readOpenRulesPayload() {
+  const capRaw = $("#openMax").value.trim();
+  let maxSessions = null;
+  if (capRaw !== "") {
+    maxSessions = Number(capRaw);
+    if (!Number.isInteger(maxSessions) || maxSessions < 1) {
+      showOpenRulesError("新建会话上限必须是正整数；留空表示不限制");
+      return null;
+    }
+  }
+  const start = $("#openStart").value;    // "" or naive "YYYY-MM-DDTHH:mm"
+  const end = $("#openEnd").value;
+  if (start && end && start >= end) {
+    showOpenRulesError("开始时间必须早于截止时间（开始时间含、截止时间不含）");
+    return null;
+  }
+  showOpenRulesError("");
+  return {
+    open_start: start || null,
+    open_end: end || null,
+    max_sessions: maxSessions,
+  };
+}
+
+async function saveOpenRules() {
+  if (!shareState.token) return;
+  const body = readOpenRulesPayload();
+  if (!body) return;
+  const btn = $("#openRulesSave");
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}/open-rules`,
+      { method: "PUT", body });
+    $("#openStart").value = utcToInput(r.open_start);
+    $("#openEnd").value = utcToInput(r.open_end);
+    $("#openMax").value = r.max_sessions ?? "";
+    renderOpenRulesStatus(r.open_state);
+    showOpenRulesError("");
+    toast("开放规则已保存");
+  } catch (err) {
+    showOpenRulesError("保存失败：" + err.message);
+  }
+  btn.disabled = false;
+}
+
+async function clearOpenRules() {
+  if (!shareState.token) return;
+  const btn = $("#openRulesClear");
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}/open-rules`,
+      { method: "PUT", body: { open_start: null, open_end: null, max_sessions: null } });
+    $("#openStart").value = "";
+    $("#openEnd").value = "";
+    $("#openMax").value = "";
+    renderOpenRulesStatus(r.open_state);
+    showOpenRulesError("");
+    toast("已清除全部开放限制");
+  } catch (err) {
+    showOpenRulesError("清除失败：" + err.message);
   }
   btn.disabled = false;
 }
