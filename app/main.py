@@ -33,6 +33,90 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_utc(value: str, field_label: str) -> str:
+    """Parse a client-supplied UTC timestamp and store it as canonical ISO text.
+
+    Naive values are accepted as UTC (the UI only offers UTC inputs); aware
+    values are converted to UTC. The returned string keeps an explicit
+    ``+00:00`` offset so later comparisons are plain lexicographic string
+    comparisons of identical-format values.
+    """
+    text = (value or "").strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, f"{field_label}时间格式不正确，请填写有效的 UTC 时间（YYYY-MM-DDTHH:MM）")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="minutes")
+
+
+def _fmt_utc(value: str | None) -> str | None:
+    """'2026-09-25T08:30:00+00:00' -> '2026-09-25 08:30 UTC' for display."""
+    if not value:
+        return None
+    return value.replace("T", " ")[:16] + " UTC"
+
+
+# Current open state of a snapshot's gate for starting NEW answer sessions.
+# Statuses: open | not_started (before the UTC start, which is inclusive) |
+# closed (at/after the UTC deadline, which is exclusive) | full (cap reached).
+def _share_open_status(open_started_at: str | None, open_deadline_at: str | None,
+                       max_new_runs: int | None, run_count: int,
+                       at: datetime | None = None) -> str:
+    now = at or datetime.now(timezone.utc)
+
+    def as_utc(value: str) -> datetime:
+        # Stored values are canonical UTC ISO text; seconds are optional
+        # (minutes precision), so compare on parsed datetimes rather than
+        # relying on lexicographic string ordering.
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    if open_started_at and now < as_utc(open_started_at):
+        return "not_started"
+    if open_deadline_at and now >= as_utc(open_deadline_at):
+        return "closed"
+    if max_new_runs is not None and run_count >= max_new_runs:
+        return "full"
+    return "open"
+
+
+def _closed_reason(status: str, open_started_at: str | None, open_deadline_at: str | None,
+                   max_new_runs: int | None) -> str:
+    """Respondent-facing message shown when starting a new session is rejected."""
+    if status == "not_started":
+        return f"本次访谈尚未开放，开始时间为 {_fmt_utc(open_started_at)}（UTC，含该时刻），请稍后再来。"
+    if status == "closed":
+        return f"本次访谈已截止，截止时间为 {_fmt_utc(open_deadline_at)}（UTC，不含该时刻），无法再开始新的作答。"
+    if status == "full":
+        return f"本次访谈名额已满（新建会话上限 {max_new_runs} 个），无法再开始新的作答。"
+    return ""
+
+
+def _share_rule_view(db, share_row) -> dict[str, Any]:
+    """Open rules + current session count/status for editor and share page."""
+    run_count = db.execute(
+        "SELECT COUNT(*) AS c FROM runs WHERE mode = 'share' AND share_token = ?",
+        (share_row["token"],),
+    ).fetchone()["c"]
+    status = _share_open_status(share_row["open_started_at"], share_row["open_deadline_at"],
+                                share_row["max_new_runs"], run_count)
+    return {
+        "open_started_at": share_row["open_started_at"],
+        "open_deadline_at": share_row["open_deadline_at"],
+        "max_new_runs": share_row["max_new_runs"],
+        "run_count": run_count,
+        "open_status": status,
+        "closed_reason": _closed_reason(status, share_row["open_started_at"],
+                                        share_row["open_deadline_at"],
+                                        share_row["max_new_runs"]),
+    }
+
+
 # ---- models ---------------------------------------------------------------
 
 class OptionIn(BaseModel):
@@ -71,6 +155,15 @@ class ShareCreate(BaseModel):
     # Optional: when set, the snapshot freezes this language's reviewed
     # translations. Must match the script's configured target language.
     lang_code: str | None = None
+
+
+class ShareRuleUpdate(BaseModel):
+    # Answer-open rules for NEW sessions of one already-created snapshot.
+    # Every field is a full-update: null (or omitted) clears that rule and
+    # means "no restriction". Times are UTC ISO-8601 strings.
+    open_started_at: str | None = None    # inclusive earliest start, null = no lower bound
+    open_deadline_at: str | None = None   # exclusive deadline, null = no upper bound
+    max_new_runs: int | None = None       # positive cap on created sessions, null = unlimited
 
 
 class LanguageIn(BaseModel):
@@ -586,8 +679,9 @@ def create_share(script_id: int, payload: ShareCreate | None = None):
 def get_share(token: str):
     with get_db() as db:
         row = db.execute("SELECT * FROM shares WHERE token = ?", (token,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "分享链接不存在或已失效")
+        if row is None:
+            raise HTTPException(404, "分享链接不存在或已失效")
+        rules = _share_rule_view(db, row)
     return {"token": row["token"], "name": row["script_name"],
             "content": json.loads(row["content"]), "created_at": row["created_at"],
             "invite_only": bool(row["invite_only"]),
@@ -595,6 +689,15 @@ def get_share(token: str):
             # Frozen reviewed translations at snapshot time; mapping:
             # translations.nodes[node_id].title/.text/.options[option_id].
             "translations": json.loads(row["translations"] or "{}"),
+            # Answer-open rules for NEW sessions + current state. Already
+            # started sessions never see this gate; it only blocks creating a
+            # new run (not_started before start / closed past deadline / full).
+            "open_started_at": rules["open_started_at"],
+            "open_deadline_at": rules["open_deadline_at"],
+            "max_new_runs": rules["max_new_runs"],
+            "run_count": rules["run_count"],
+            "open_status": rules["open_status"],
+            "closed_reason": rules["closed_reason"],
             "read_only": True}
 
 
@@ -609,7 +712,8 @@ def list_script_shares(script_id: int):
     _fetch_script(script_id)  # 404 when the script itself is gone
     with get_db() as db:
         rows = db.execute(
-            "SELECT token, script_name, created_at, invite_only, lang_code, lang_label "
+            "SELECT token, script_name, created_at, invite_only, lang_code, lang_label, "
+            "open_started_at, open_deadline_at, max_new_runs "
             "FROM shares WHERE script_id = ? ORDER BY created_at DESC, token DESC",
             (script_id,),
         ).fetchall()
@@ -621,16 +725,73 @@ def list_script_shares(script_id: int):
             "GROUP BY share_token",
             (script_id,),
         ).fetchall()}
-    return [{
-        "token": r["token"],
-        "name": r["script_name"],
-        "created_at": r["created_at"],
-        "invite_only": bool(r["invite_only"]),
-        "lang_code": r["lang_code"],
-        "lang_label": r["lang_label"],
-        "run_count": (stats[r["token"]]["run_count"] if r["token"] in stats else 0),
-        "finished_count": (stats[r["token"]]["finished_count"] if r["token"] in stats else 0),
-    } for r in rows]
+        out = []
+        for r in rows:
+            run_count = stats[r["token"]]["run_count"] if r["token"] in stats else 0
+            open_status = _share_open_status(r["open_started_at"], r["open_deadline_at"],
+                                             r["max_new_runs"], run_count)
+            out.append({
+                "token": r["token"],
+                "name": r["script_name"],
+                "created_at": r["created_at"],
+                "invite_only": bool(r["invite_only"]),
+                "lang_code": r["lang_code"],
+                "lang_label": r["lang_label"],
+                "run_count": run_count,
+                "finished_count": (stats[r["token"]]["finished_count"]
+                                   if r["token"] in stats else 0),
+                "open_started_at": r["open_started_at"],
+                "open_deadline_at": r["open_deadline_at"],
+                "max_new_runs": r["max_new_runs"],
+                "open_status": open_status,
+            })
+    return out
+
+
+@app.get("/api/share/{token}/rules")
+def get_share_rules(token: str):
+    """Editor view of a snapshot's answer-open rules and current open state."""
+    with get_db() as db:
+        share = db.execute("SELECT * FROM shares WHERE token = ?", (token,)).fetchone()
+        if share is None:
+            raise HTTPException(404, "分享链接不存在或已失效")
+        return _share_rule_view(db, share)
+
+
+@app.put("/api/share/{token}/rules")
+def update_share_rules(token: str, payload: ShareRuleUpdate):
+    """Set/clear the answer-open rules of an ALREADY-CREATED share snapshot.
+
+    A full update of the three independent rules: each null field clears that
+    restriction (unset = unlimited). Times are UTC; the start is inclusive and
+    the deadline is exclusive, so a start >= deadline can never admit a new
+    session and is rejected. The session cap must be a positive integer. The
+    check is a plain validation — the count of already-created sessions is
+    never an error (a lowered cap simply makes the snapshot 已满/full).
+    """
+    start_raw = (payload.open_started_at.strip() if payload.open_started_at else None)
+    deadline_raw = (payload.open_deadline_at.strip() if payload.open_deadline_at else None)
+    max_new_runs = payload.max_new_runs
+    if max_new_runs is not None and max_new_runs < 1:
+        raise HTTPException(400, "新建会话上限必须是正整数（≥ 1）；不限制请留空")
+    started = _parse_utc(start_raw, "开始") if start_raw else None
+    deadline = _parse_utc(deadline_raw, "截止") if deadline_raw else None
+    if started and deadline:
+        started_dt = datetime.fromisoformat(started)
+        deadline_dt = datetime.fromisoformat(deadline)
+        if started_dt >= deadline_dt:
+            raise HTTPException(400, "开始时间必须早于截止时间（开始时刻含、截止时刻不含），请调整后再保存")
+    with get_db() as db:
+        share = db.execute("SELECT * FROM shares WHERE token = ?", (token,)).fetchone()
+        if share is None:
+            raise HTTPException(404, "分享链接不存在或已失效")
+        db.execute(
+            "UPDATE shares SET open_started_at = ?, open_deadline_at = ?, max_new_runs = ? "
+            "WHERE token = ?",
+            (started, deadline, max_new_runs, token),
+        )
+        share = db.execute("SELECT * FROM shares WHERE token = ?", (token,)).fetchone()
+        return _share_rule_view(db, share)
 
 
 @app.get("/api/share/{token}/funnel")
@@ -849,11 +1010,29 @@ def start_run(payload: RunStart):
         invite_required = False
         if mode == "share":
             share = db.execute(
-                "SELECT content, invite_only FROM shares WHERE token = ?",
+                "SELECT content, invite_only, open_started_at, open_deadline_at, max_new_runs "
+                "FROM shares WHERE token = ?",
                 (payload.share_token,),
             ).fetchone()
             if share is None:
                 raise HTTPException(404, "分享不存在")
+            # Gate on the answer-open rules INSIDE this same write transaction:
+            # the session count is read with the write lock held, so a
+            # concurrent creation racing for the last slot cannot overshoot the
+            # cap. A rejection raises before any run insert or invite-code
+            # consumption, so neither a session nor an invite code is spent.
+            run_count = db.execute(
+                "SELECT COUNT(*) AS c FROM runs WHERE mode = 'share' AND share_token = ?",
+                (payload.share_token,),
+            ).fetchone()["c"]
+            open_status = _share_open_status(share["open_started_at"], share["open_deadline_at"],
+                                             share["max_new_runs"], run_count)
+            if open_status != "open":
+                # 403 mirrors the invite gate; the share page shows this reason
+                # (未开放 / 已截止 / 已满) in place of the start controls.
+                raise HTTPException(403, _closed_reason(open_status, share["open_started_at"],
+                                                        share["open_deadline_at"],
+                                                        share["max_new_runs"]))
             content = json.loads(share["content"])
             invite_required = bool(share["invite_only"])
             if invite_required:

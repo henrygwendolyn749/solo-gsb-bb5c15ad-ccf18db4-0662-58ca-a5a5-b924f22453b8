@@ -259,12 +259,22 @@
       <p style="margin:0 0 12px;color:var(--muted);font-size:13px">
         链接打开的是生成分享时脚本的只读快照（受访者视角），后续编辑不影响已分享内容。</p>
 
-      <div class="field">
-        <label for="shareLang">快照语言（逐字段展示该语言下当时已复核的译文，缺失/待复核字段回退原文）</label>
-        <select id="shareLang"></select>
+      <!-- switch between creating a new snapshot and managing an existing one -->
+      <div class="share-pick-row">
+        <label for="sharePick" style="white-space:nowrap">管理快照</label>
+        <select id="sharePick"></select>
       </div>
-      <div style="margin:0 0 12px"><button class="primary" id="shareCreate">🔗 生成分享快照</button></div>
 
+      <!-- create a NEW snapshot -->
+      <div id="shareCreateBox">
+        <div class="field">
+          <label for="shareLang">快照语言（逐字段展示该语言下当时已复核的译文，缺失/待复核字段回退原文）</label>
+          <select id="shareLang"></select>
+        </div>
+        <div style="margin:0 0 12px"><button class="primary" id="shareCreate">🔗 生成分享快照</button></div>
+      </div>
+
+      <!-- manage an ALREADY-CREATED snapshot: link + open rules + invites -->
       <div id="shareResult" style="display:none">
         <div class="share-link-row">
           <input id="shareLink" readonly>
@@ -272,6 +282,37 @@
         </div>
         <div style="margin:10px 0 0" id="shareLangNote" class="i18n-lang-hint"></div>
         <div style="margin-top:12px"><button class="primary" id="shareOpen">在新标签页打开</button></div>
+
+        <!-- answer-open rules: UTC start (inclusive) / deadline (exclusive) /
+             new-session cap. Unset = unlimited; rules gate only NEW sessions. -->
+        <div class="rule-box">
+          <h4>🕒 作答开放规则（仅限制新建作答，UTC 时间）</h4>
+          <p class="rule-hint">
+            三项可任意组合，<b>留空即不限制</b>：开始时间<b>含</b>该时刻、截止时间<b>不含</b>该时刻；
+            上限为正整数，指该快照<b>已创建的作答会话数</b>。规则只拦截<b>新建会话</b>——
+            受访者已开始的会话仍可继续作答、撤回与续答，编辑器「▶ 运行预览」不受任何限制。
+            保存时会校验开始必须早于截止、上限必须为正整数。</p>
+          <div class="rule-grid">
+            <div>
+              <label for="ruleStarted">UTC 开始时间（留空 = 不设下限）</label>
+              <input id="ruleStarted" type="datetime-local">
+            </div>
+            <div>
+              <label for="ruleDeadline">UTC 截止时间（留空 = 永不截止）</label>
+              <input id="ruleDeadline" type="datetime-local">
+            </div>
+            <div>
+              <label for="ruleMaxRuns">新建会话上限（正整数，留空 = 不限）</label>
+              <input id="ruleMaxRuns" type="number" min="1" step="1" placeholder="例如 100">
+            </div>
+          </div>
+          <div class="rule-actions">
+            <button class="primary" id="ruleSave">保存开放规则</button>
+            <button id="ruleClear">清除全部规则</button>
+            <button id="ruleRefresh">↻ 刷新状态</button>
+          </div>
+          <div id="ruleStatus" class="rule-status"></div>
+        </div>
 
         <div class="invite-box">
           <h4>🎫 邀请码（邀请制）</h4>

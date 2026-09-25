@@ -1058,6 +1058,10 @@ function bindToolbar() {
   });
   $("#btnShare").onclick = openShare;
   $("#shareCreate").onclick = createShareSnapshot;
+  $("#sharePick").onchange = onSharePickChange;
+  $("#ruleSave").onclick = saveShareRules;
+  $("#ruleClear").onclick = clearShareRules;
+  $("#ruleRefresh").onclick = renderRuleStatus;
   $("#inviteGen").onclick = generateInvites;
   $("#inviteRefresh").onclick = loadInvites;
   $("#btnExport").onclick = exportJson;
@@ -1674,7 +1678,8 @@ function renderFunnelSnapshotOptions() {
   sel.disabled = false;
   sel.innerHTML = funnelState.shares.map((s) => {
     const dt = (s.created_at || "").replace("T", " ").slice(0, 16);
-    return `<option value="${esc(s.token)}">${esc(s.name)} · ${dt} · 会话 ${s.run_count}（完成 ${s.finished_count}）${
+    const gate = { open: "", not_started: " · ⏳未开放", closed: " · ⛔已截止", full: " · 👥已满" }[s.open_status] || "";
+    return `<option value="${esc(s.token)}">${esc(s.name)} · ${dt} · 会话 ${s.run_count}（完成 ${s.finished_count}）${gate}${
       s.invite_only ? " · 🎫邀请制" : ""}${s.lang_code ? ` · 🌐${esc(s.lang_code)}` : " · 原文"}</option>`;
   }).join("");
   if (!funnelState.token || !funnelState.shares.some((s) => s.token === funnelState.token)) {
@@ -1834,7 +1839,7 @@ function renderFunnelNode(node, isRoot) {
 
 // ---------------------------------------------------------------- share / preview
 
-const shareState = { token: null, url: "" };
+const shareState = { token: null, url: "", shares: [], detail: null };
 
 async function openShare() {
   if (!state.currentId) return;
@@ -1852,9 +1857,97 @@ async function openShare() {
   } else {
     sel.innerHTML = `<option value="">原文（脚本尚未设置目标语言）</option>`;
   }
-  $("#shareResult").style.display = "none";
+  shareState.token = null;
+  shareState.detail = null;
   $("#shareLangNote").innerHTML = "";
   openModal("shareModal");
+  await refreshSharePick(state.currentId, true);
+  // Jump straight into the newest existing snapshot; with none, show the form.
+  if (shareState.token) await loadExistingShare();
+}
+
+// Load the script's snapshot list and populate the "manage snapshot" picker.
+async function refreshSharePick(scriptId, selectFirst = false) {
+  const sel = $("#sharePick");
+  try {
+    shareState.shares = await api(`/api/scripts/${scriptId}/shares`);
+  } catch (err) {
+    shareState.shares = [];
+  }
+  if (!shareState.shares.length) {
+    sel.innerHTML = `<option value="">（暂无已创建快照，请先生成一个）</option>`;
+    sel.disabled = true;
+    showShareCreateBox();
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = shareState.shares.map((s) => {
+    const dt = (s.created_at || "").replace("T", " ").slice(0, 16);
+    const statusText = {
+      open: "🟢 开放中", not_started: "⏳ 未开放", closed: "⛔ 已截止", full: "👥 已满",
+    }[s.open_status] || s.open_status;
+    return `<option value="${esc(s.token)}">${dt} · ${esc(statusText)} · 会话 ${s.run_count}${
+      s.invite_only ? " · 🎫邀请制" : ""}${s.lang_code ? ` · 🌐${esc(s.lang_code)}` : ""}</option>`;
+  }).join("");
+  const keep = shareState.shares.some((s) => s.token === shareState.token);
+  if (selectFirst || !keep) {
+    shareState.token = shareState.shares[0].token;
+  }
+  sel.value = shareState.token;
+}
+
+function showShareCreateBox() {
+  $("#shareCreateBox").style.display = "";
+  $("#shareResult").style.display = "none";
+}
+
+async function onSharePickChange() {
+  shareState.token = $("#sharePick").value || null;
+  if (!shareState.token) { showShareCreateBox(); return; }
+  await loadExistingShare();
+}
+
+// Load one created snapshot: link/language note, answer-open rules and invites.
+async function loadExistingShare() {
+  if (!shareState.token) return;
+  $("#shareCreateBox").style.display = "none";
+  $("#shareResult").style.display = "";
+  shareState.url = `${location.origin}/share.html?token=${encodeURIComponent(shareState.token)}`;
+  $("#shareLink").value = shareState.url;
+  $("#shareOpen").onclick = () => window.open(shareState.url, "_blank");
+  $("#shareCopy").onclick = () => {
+    copyText(shareState.url).then((ok) => toast(ok ? "链接已复制" : "复制失败，请手动选择复制"));
+  };
+  try {
+    const [detail] = await Promise.all([
+      api(`/api/share/${encodeURIComponent(shareState.token)}`),
+      loadInvites(),
+    ]);
+    shareState.detail = detail;
+    renderShareLangNote(detail);
+    fillRuleFields(detail);
+    await renderRuleStatus();
+  } catch (err) {
+    toast("快照信息加载失败：" + err.message, 3500);
+  }
+}
+
+function renderShareLangNote(detail) {
+  const note = $("#shareLangNote");
+  if (detail.lang_code) {
+    let frozen = 0;
+    const nodes = detail.translations?.nodes || {};
+    for (const n of Object.values(nodes)) {
+      if (n.title) frozen++;
+      if (n.text) frozen++;
+      frozen += Object.keys(n.options || {}).length;
+    }
+    note.innerHTML = `🌐 该快照冻结了 <b>${esc(detail.lang_label || detail.lang_code)}</b> 语言下
+      生成时刻的<b>已复核译文（${frozen} 个字段）</b>；作答页逐字段展示译文，
+      缺失 / 待复核字段回退原文。译文已随快照固定，之后继续翻译或修改原文都不影响此链接。`;
+  } else {
+    note.innerHTML = "该快照为<b>纯原文</b>，作答页展示脚本原文。";
+  }
 }
 
 async function createShareSnapshot() {
@@ -1868,28 +1961,122 @@ async function createShareSnapshot() {
       body: langCode ? { lang_code: langCode } : {},
     });
     shareState.token = r.token;
-    shareState.url = location.origin + r.url;
-    $("#shareLink").value = shareState.url;
-    $("#shareResult").style.display = "";
-    const note = $("#shareLangNote");
-    if (r.lang_code) {
-      const c = state.i18n.view?.counts || { reviewed: 0, pending: 0, missing: 0 };
-      note.innerHTML = `🌐 该快照已冻结 <b>${esc(r.lang_label || r.lang_code)}</b> 语言下
-        生成时刻的<b>已复核译文（${c.reviewed} 个字段）</b>；作答页逐字段展示译文，
-        <b>待复核（${c.pending}）/ 缺失（${c.missing}）字段回退原文</b>。译文已随快照固定，
-        之后继续翻译或修改原文都不影响此链接。`;
-    } else {
-      note.innerHTML = `该快照为<b>纯原文</b>，作答页展示脚本原文。`;
-    }
-    $("#shareOpen").onclick = () => window.open(shareState.url, "_blank");
-    $("#shareCopy").onclick = () => {
-      copyText(shareState.url).then((ok) => toast(ok ? "链接已复制" : "复制失败，请手动选择复制"));
-    };
-    loadInvites();
+    toast("分享快照已创建");
+    // Refresh the picker (keeping the new snapshot selected), then open it.
+    await refreshSharePick(state.currentId, false);
+    await loadExistingShare();
   } catch (err) {
     toast("创建分享失败：" + err.message, 3500);
   }
   btn.disabled = false;
+}
+
+// ---- answer-open rules (UTC start inclusive / deadline exclusive / cap) ----
+
+// Server ISO (with offset) -> datetime-local value ('YYYY-MM-DDTHH:mm' UTC).
+function isoToLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  // Build the UTC components explicitly: the editor edits UTC wall-clock time.
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function fillRuleFields(detail) {
+  $("#ruleStarted").value = isoToLocalInput(detail.open_started_at);
+  $("#ruleDeadline").value = isoToLocalInput(detail.open_deadline_at);
+  $("#ruleMaxRuns").value = detail.max_new_runs ?? "";
+}
+
+async function renderRuleStatus() {
+  const el = $("#ruleStatus");
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}/rules`);
+    const labels = {
+      open: ["open", "🟢 当前开放：可新建作答"],
+      not_started: ["not_started", "⏳ 未开放：到达开始时间后才可新建作答"],
+      closed: ["closed", "⛔ 已截止：不能再新建作答"],
+      full: ["full", "👥 已满：已创建会话数达到上限"],
+    };
+    const [cls, text] = labels[r.open_status] || ["open", r.open_status];
+    const meta = [];
+    meta.push(`已创建会话 <b>${r.run_count}</b>` +
+      (r.max_new_runs != null ? ` / 上限 <b>${r.max_new_runs}</b>` : " / 上限不限"));
+    meta.push(r.open_started_at
+      ? `开始 ${esc(r.open_started_at.replace("T", " ").slice(0, 16))} UTC（含）`
+      : "不设开始时间");
+    meta.push(r.open_deadline_at
+      ? `截止 ${esc(r.open_deadline_at.replace("T", " ").slice(0, 16))} UTC（不含）`
+      : "不设截止时间");
+    el.innerHTML = `<span class="rule-pill ${cls}">${text}</span>
+      <span class="rule-meta">${meta.join(" · ")}</span>`;
+  } catch (err) {
+    el.innerHTML = `<span class="invite-err">开放状态加载失败：${esc(err.message)}</span>`;
+  }
+}
+
+function collectRulePayload() {
+  const started = $("#ruleStarted").value;
+  const deadline = $("#ruleDeadline").value;
+  const maxRaw = $("#ruleMaxRuns").value.trim();
+  let max_new_runs = null;
+  if (maxRaw !== "") {
+    if (!/^\d+$/.test(maxRaw)) throw new Error("新建会话上限必须是正整数");
+    max_new_runs = Number(maxRaw);
+    if (max_new_runs < 1) throw new Error("新建会话上限必须是正整数（≥ 1）");
+  }
+  // datetime-local gives UTC wall-clock 'YYYY-MM-DDTHH:mm'; send with explicit offset.
+  if (started && deadline && started >= deadline) {
+    throw new Error("开始时间必须早于截止时间（开始含、截止不含）");
+  }
+  return {
+    open_started_at: started ? `${started}:00+00:00` : null,
+    open_deadline_at: deadline ? `${deadline}:00+00:00` : null,
+    max_new_runs,
+  };
+}
+
+async function saveShareRules() {
+  if (!shareState.token) return;
+  let payload;
+  try {
+    payload = collectRulePayload();
+  } catch (err) {
+    toast(err.message);
+    return;
+  }
+  const btn = $("#ruleSave");
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}/rules`, {
+      method: "PUT", body: payload,
+    });
+    fillRuleFields(r);
+    await renderRuleStatus();
+    await refreshSharePick(state.currentId, false);
+    toast("作答开放规则已保存");
+  } catch (err) {
+    toast("保存失败：" + err.message, 3500);
+  }
+  btn.disabled = false;
+}
+
+async function clearShareRules() {
+  if (!shareState.token) return;
+  if (!confirm("清除该快照的全部作答开放规则（开始时间、截止时间、新建会话上限）？清除后将不限制新建作答。")) return;
+  try {
+    const r = await api(`/api/share/${encodeURIComponent(shareState.token)}/rules`, {
+      method: "PUT",
+      body: { open_started_at: null, open_deadline_at: null, max_new_runs: null },
+    });
+    fillRuleFields(r);
+    await renderRuleStatus();
+    await refreshSharePick(state.currentId, false);
+    toast("已清除全部开放规则，当前不限制新建作答");
+  } catch (err) {
+    toast("清除失败：" + err.message, 3500);
+  }
 }
 
 async function loadInvites() {
